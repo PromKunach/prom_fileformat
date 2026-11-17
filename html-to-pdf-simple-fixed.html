@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HTML to PDF</title>
+<style>
+  *{box-sizing:border-box}
+  :root{--ink:#111827;--muted:#6b7280;--line:#e5e7eb;--bg:#f3f4f6;--blue:#2563eb}
+  html,body{margin:0;min-height:100%;font-family:Arial,Helvetica,sans-serif;color:var(--ink);background:var(--bg)}
+  button{font:inherit}
+  #start{min-height:100vh;display:grid;place-items:center;padding:24px}
+  .select-btn,.download-btn,.back-btn{
+    border:0;border-radius:12px;padding:14px 20px;font-weight:700;cursor:pointer
+  }
+  .select-btn,.download-btn{background:var(--ink);color:#fff}
+  .select-btn:hover,.download-btn:hover{opacity:.9}
+  #file{display:none}
+  #workspace{display:none;min-height:100vh}
+  .bar{
+    position:sticky;top:0;z-index:20;height:68px;background:rgba(255,255,255,.96);
+    border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 18px
+  }
+  .filename{min-width:0;flex:1;font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .status{font-size:12px;color:var(--muted);white-space:nowrap}
+  .back-btn{background:#eef0f3;color:var(--ink);padding:11px 14px}
+  .download-btn{padding:11px 16px}
+  .preview-wrap{padding:22px}
+  .preview-shell{
+    max-width:1100px;margin:auto;background:#fff;border:1px solid var(--line);
+    border-radius:14px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.06)
+  }
+  iframe{display:block;width:100%;height:calc(100vh - 115px);border:0;background:#fff}
+  #busy{
+    position:fixed;inset:0;z-index:100;background:rgba(255,255,255,.88);
+    display:none;place-items:center;text-align:center;font-weight:700
+  }
+  #busy small{display:block;margin-top:7px;color:var(--muted);font-weight:400}
+  @media(max-width:650px){
+    .bar{height:auto;min-height:64px;flex-wrap:wrap;padding:10px 12px}
+    .filename{order:3;flex-basis:100%}
+    .status{display:none}
+    .preview-wrap{padding:10px}
+    iframe{height:calc(100vh - 115px)}
+  }
+</style>
+</head>
+<body>
+<section id="start">
+  <label class="select-btn" for="file">Select HTML file</label>
+  <input id="file" type="file" accept=".html,.htm,text/html">
+</section>
+
+<section id="workspace">
+  <div class="bar">
+    <button class="back-btn" id="back">←</button>
+    <div class="filename" id="filename">HTML preview</div>
+    <div class="status" id="status">Ready</div>
+    <button class="download-btn" id="download">Download PDF</button>
+  </div>
+  <div class="preview-wrap">
+    <div class="preview-shell"><iframe id="preview" sandbox="allow-same-origin"></iframe></div>
+  </div>
+</section>
+
+<div id="busy"><div>Creating PDF…<small>Waiting for fonts and images before rendering.</small></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+const fileInput=document.getElementById('file');
+const start=document.getElementById('start');
+const workspace=document.getElementById('workspace');
+const preview=document.getElementById('preview');
+const filenameEl=document.getElementById('filename');
+const statusEl=document.getElementById('status');
+const busy=document.getElementById('busy');
+let sourceName='document.html';
+
+fileInput.addEventListener('change',async()=>{
+  const file=fileInput.files[0];
+  if(!file)return;
+  if(!/\.html?$/i.test(file.name)){alert('Please select an HTML file.');fileInput.value='';return}
+  sourceName=file.name;
+  filenameEl.textContent=file.name;
+  const text=await file.text();
+  preview.srcdoc=text;
+  start.style.display='none';
+  workspace.style.display='block';
+  statusEl.textContent='Loading preview…';
+  preview.onload=async()=>{
+    try{await waitForAssets(preview.contentDocument)}catch(e){}
+    const pages=findExplicitPages(preview.contentDocument);
+    statusEl.textContent=pages.length?`${pages.length} page${pages.length===1?'':'s'} detected`:'Ready';
+  };
+});
+
+document.getElementById('back').onclick=()=>{
+  workspace.style.display='none';start.style.display='grid';
+  preview.srcdoc='';fileInput.value='';statusEl.textContent='Ready';
+};
+
+function findExplicitPages(doc){
+  const selectors=['.page','.a4','.sheet','[data-page]'];
+  for(const s of selectors){
+    const found=[...doc.querySelectorAll(s)];
+    if(found.length)return found;
+  }
+  return [];
+}
+
+async function waitForAssets(doc){
+  if(doc.fonts && doc.fonts.ready){
+    try{await Promise.race([doc.fonts.ready,new Promise(r=>setTimeout(r,6000))])}catch(e){}
+  }
+  const imgs=[...doc.images];
+  await Promise.all(imgs.map(img=>{
+    if(img.complete)return Promise.resolve();
+    return new Promise(r=>{
+      const done=()=>r();
+      img.addEventListener('load',done,{once:true});
+      img.addEventListener('error',done,{once:true});
+      setTimeout(done,5000);
+    });
+  }));
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+}
+
+function pxPerMm(){
+  const d=document.createElement('div');
+  d.style.cssText='position:absolute;visibility:hidden;width:100mm;height:1px';
+  document.body.appendChild(d);
+  const v=d.getBoundingClientRect().width/100;
+  d.remove(); return v||3.7795275591;
+}
+
+function addExportOverrides(doc, explicit){
+  const style=doc.createElement('style');
+  style.id='__pdf_export_fix__';
+  style.textContent=`
+    html,body{margin:0!important;padding:0!important;background:#fff!important;}
+    ${explicit ? `
+    .page,.a4,.sheet,[data-page]{
+      margin:0!important;
+      box-shadow:none!important;
+      break-after:auto!important;
+      page-break-after:auto!important;
+    }` : ''}
+  `;
+  doc.head.appendChild(style);
+  return style;
+}
+
+async function renderElementToCanvas(el, doc, widthPx, heightPx){
+  const old={
+    margin:el.style.margin,
+    boxShadow:el.style.boxShadow,
+    breakAfter:el.style.breakAfter,
+    pageBreakAfter:el.style.pageBreakAfter,
+    width:el.style.width,
+    height:el.style.height,
+    minHeight:el.style.minHeight,
+    overflow:el.style.overflow
+  };
+  el.style.margin='0';
+  el.style.boxShadow='none';
+  el.style.breakAfter='auto';
+  el.style.pageBreakAfter='auto';
+
+  // A detected page is normalized to a single A4 sheet for export.
+  el.style.width='210mm';
+  el.style.height='297mm';
+  el.style.minHeight='0';
+  el.style.overflow='hidden';
+
+  try{
+    return await html2canvas(el,{
+      backgroundColor:'#ffffff',
+      scale:2,
+      useCORS:true,
+      allowTaint:false,
+      logging:false,
+      width:widthPx,
+      height:heightPx,
+      windowWidth:Math.max(doc.documentElement.scrollWidth,widthPx),
+      windowHeight:Math.max(doc.documentElement.scrollHeight,heightPx),
+      scrollX:0,scrollY:0
+    });
+  } finally {
+    Object.assign(el.style,old);
+  }
+}
+
+async function exportExplicitPages(doc,pages,pdf){
+  const ppm=pxPerMm(), w=Math.round(210*ppm), h=Math.round(297*ppm);
+  for(let i=0;i<pages.length;i++){
+    statusEl.textContent=`Rendering page ${i+1} of ${pages.length}…`;
+    const canvas=await renderElementToCanvas(pages[i],doc,w,h);
+    if(i>0)pdf.addPage('a4','portrait');
+    pdf.addImage(canvas.toDataURL('image/jpeg',0.96),'JPEG',0,0,210,297,undefined,'FAST');
+  }
+}
+
+async function exportFlowingDocument(doc,pdf){
+  statusEl.textContent='Rendering document…';
+  const canvas=await html2canvas(doc.body,{
+    backgroundColor:'#ffffff',scale:2,useCORS:true,allowTaint:false,logging:false,
+    windowWidth:doc.documentElement.scrollWidth,
+    windowHeight:doc.documentElement.scrollHeight,
+    scrollX:0,scrollY:0
+  });
+  const img=canvas.toDataURL('image/jpeg',0.96);
+  const pageW=210,pageH=297;
+  const imgH=canvas.height*pageW/canvas.width;
+  let remaining=imgH, y=0, first=true;
+  while(remaining>0){
+    if(!first)pdf.addPage('a4','portrait');
+    pdf.addImage(img,'JPEG',0,y,pageW,imgH,undefined,'FAST');
+    remaining-=pageH;
+    y-=pageH;
+    first=false;
+  }
+}
+
+document.getElementById('download').onclick=async()=>{
+  const doc=preview.contentDocument;
+  if(!doc)return;
+  busy.style.display='grid';
+  try{
+    await waitForAssets(doc);
+    const pages=findExplicitPages(doc);
+    const fix=addExportOverrides(doc,pages.length>0);
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+
+    const {jsPDF}=window.jspdf;
+    const pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4',compress:true});
+
+    if(pages.length) await exportExplicitPages(doc,pages,pdf);
+    else await exportFlowingDocument(doc,pdf);
+
+    fix.remove();
+    const base=sourceName.replace(/\.html?$/i,'')||'document';
+    pdf.save(base+'.pdf');
+    statusEl.textContent=pages.length?`${pages.length} pages exported`:'PDF exported';
+  }catch(err){
+    console.error(err);
+    alert('Could not create the PDF. If the HTML loads fonts or images from blocked external URLs, embed those resources in the HTML and try again.');
+    statusEl.textContent='Export failed';
+    const fix=preview.contentDocument && preview.contentDocument.getElementById('__pdf_export_fix__');
+    if(fix)fix.remove();
+  }finally{
+    busy.style.display='none';
+  }
+};
+</script>
+</body>
+</html>
